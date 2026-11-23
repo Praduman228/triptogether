@@ -1,0 +1,17 @@
+import { createContext,useContext,useEffect,useState,useCallback,type ReactNode } from 'react';
+import { useServerFn } from '@tanstack/react-start';
+import { getOverview,saveExpense,type Overview,type ExpenseInput } from '@/lib/trips.functions';
+import { cachedOverview,cacheOverview,enqueue,queued,synchronize } from '@/lib/offline';
+import { supabase } from '@/integrations/supabase/client';
+import { useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+type State={data:Overview|null;error:string;online:boolean;pending:Awaited<ReturnType<typeof queued>>;refresh:()=>Promise<void>;addExpense:(data:ExpenseInput)=>Promise<void>};
+const TripContext=createContext<State|null>(null);
+export function TripProvider({children}:{children:ReactNode}){
+ const fetch=useServerFn(getOverview);const save=useServerFn(saveExpense);const queryClient=useQueryClient();const [data,setData]=useState<Overview|null>(null);const [error,setError]=useState('');const [online,setOnline]=useState(true);const [pending,setPending]=useState<State['pending']>([]);
+ const refresh=useCallback(async()=>{const {data:auth}=await supabase.auth.getUser();const userId=auth.user?.id;if(!userId){const {data:s}=await supabase.auth.getSession();if(!s.session?.user.id)return;const cached=await cachedOverview(s.session.user.id);if(cached)setData(cached);setPending(await queued(s.session.user.id));return;}try{if(navigator.onLine){await synchronize(userId,p=>save({data:p}));const next=await queryClient.fetchQuery({queryKey:['trip-overview',userId],queryFn:()=>fetch()});setData(next);await cacheOverview(userId,next);setError('');}else{const cached=await cachedOverview(userId);if(cached)setData(cached);}setPending(await queued(userId));}catch(e){const cached=await cachedOverview(userId);if(cached)setData(cached);setError(e instanceof Error?e.message:'Unable to load your trips.');}},[fetch,save,queryClient]);
+ useEffect(()=>{void refresh();const connect=()=>{setOnline(navigator.onLine);if(navigator.onLine)void refresh();};setOnline(navigator.onLine);window.addEventListener('online',connect);window.addEventListener('offline',connect);const channel=supabase.channel('trip-updates-'+crypto.randomUUID()).on('postgres_changes',{event:'*',schema:'public',table:'expenses'},()=>void refresh()).on('postgres_changes',{event:'*',schema:'public',table:'settlements'},()=>void refresh()).on('postgres_changes',{event:'*',schema:'public',table:'trip_members'},()=>void refresh()).subscribe();return()=>{window.removeEventListener('online',connect);window.removeEventListener('offline',connect);void supabase.removeChannel(channel);};},[refresh]);
+ const addExpense=async(input:ExpenseInput)=>{if(!data)throw new Error('Sign in first.');await enqueue(data.userId,input);setPending(await queued(data.userId));if(navigator.onLine){await refresh();const ops=await queued(data.userId);const failed=ops.find(o=>o.id===input.id);if(failed)toast.warning('Expense saved on this device. '+(failed.error??'Waiting to sync.'));else toast.success('Expense added.');}else toast.success('Expense saved offline. Waiting to sync.');};
+ return <TripContext.Provider value={{data,error,online,pending,refresh,addExpense}}>{children}</TripContext.Provider>;
+}
+export function useTrips(){const c=useContext(TripContext);if(!c)throw new Error('Trip provider missing');return c;}

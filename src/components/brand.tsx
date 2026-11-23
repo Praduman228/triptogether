@@ -1,0 +1,3 @@
+import { Mountain } from 'lucide-react';
+export function Brand(){return <div className="wordmark"><span className="brand-mark"><Mountain size={23}/></span>TripTogether<span className="text-primary">.</span></div>;}
+export function Avatar({name,url}:{name:string;url?:string|null|undefined}){return <span className="avatar-circle">{url?<img src={url} alt={name} referrerPolicy="no-referrer"/>:name.split(' ').filter(Boolean).slice(0,2).map(n=>n[0]).join('').toUpperCase()||'T'}</span>;}
