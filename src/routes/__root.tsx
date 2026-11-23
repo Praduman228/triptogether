@@ -83,7 +83,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     // twitter:image here: every page without its own would inherit the root's preview image.
     meta: [
       { charSet: "utf-8" },
-      { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { name: "viewport", content: "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" },
+      { name: "mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-capable", content: "yes" },
+      { name: "apple-mobile-web-app-status-bar-style", content: "default" },
       { title: "TripTogether — Shared trips, clear balances" },
       { name: "description", content: "Travel together with transparent shared expenses and trip budgets." },
       { name: "theme-color", content: "#147d68" },
@@ -131,12 +134,20 @@ function RootComponent() {
   const router = useRouter();
   useEffect(()=>{
     void registerOfflineApp();
+    // App-like feel: block pinch and trackpad/ctrl zoom (iOS Safari ignores user-scalable=no).
+    const stop=(e:Event)=>e.preventDefault();
+    const multiTouch=(e:TouchEvent)=>{if(e.touches.length>1)e.preventDefault();};
+    const ctrlWheel=(e:WheelEvent)=>{if(e.ctrlKey)e.preventDefault();};
+    document.addEventListener('gesturestart',stop,{passive:false});
+    document.addEventListener('gesturechange',stop,{passive:false});
+    document.addEventListener('touchmove',multiTouch,{passive:false});
+    document.addEventListener('wheel',ctrlWheel,{passive:false});
     const {data:{subscription}}=supabase.auth.onAuthStateChange(event=>{
       if(!['SIGNED_IN','SIGNED_OUT','USER_UPDATED'].includes(event))return;
       void router.invalidate();
       if(event!=='SIGNED_OUT')void queryClient.invalidateQueries();
     });
-    return()=>subscription.unsubscribe();
+    return()=>{subscription.unsubscribe();document.removeEventListener('gesturestart',stop);document.removeEventListener('gesturechange',stop);document.removeEventListener('touchmove',multiTouch);document.removeEventListener('wheel',ctrlWheel);};
   },[router,queryClient]);
 
   return (
