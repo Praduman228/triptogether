@@ -1,6 +1,6 @@
 export type Share = { user_id: string; amount: number };
 export type Expense = { id: string; trip_id: string; title: string; amount: number; category: string; occurred_at: string; description: string; created_by: string; reversal_of: string | null; receipt_path: string | null; expense_contributions: Share[]; expense_splits: Share[] };
-export type Settlement = { id: string; trip_id: string; sender_id: string; recipient_id: string; amount: number; note: string; occurred_at: string };
+export type Settlement = { id: string; trip_id: string; created_by?: string; sender_id: string; recipient_id: string; amount: number; note: string; occurred_at: string };
 export function parseMoney(value: string) {
   if (!/^\d+(\.\d{1,2})?$/.test(value.trim())) throw new Error('Enter an amount with up to two decimal places.');
   const [whole, fraction = ''] = value.trim().split('.');

@@ -549,3 +549,126 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN
   NULL;
 END $$;
+
+-- 12. Creator edit & delete for transactions
+-- Only the member who created an expense or settlement can edit or delete it.
+-- Balances and suggested settlements are derived from these rows, so they update automatically.
+CREATE OR REPLACE FUNCTION public.update_expense(p jsonb)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  eid uuid := (p->>'id')::uuid;
+  a bigint := (p->>'amount')::bigint;
+  e public.expenses;
+  c jsonb;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in required'; END IF;
+  SELECT * INTO e FROM public.expenses WHERE id = eid FOR UPDATE;
+  IF NOT FOUND OR NOT public.is_trip_member(e.trip_id) THEN RAISE EXCEPTION 'Expense not found'; END IF;
+  IF e.created_by <> auth.uid() THEN RAISE EXCEPTION 'Only the person who added this expense can edit it'; END IF;
+  IF e.reversal_of IS NOT NULL OR EXISTS (SELECT 1 FROM public.expenses WHERE reversal_of = eid) THEN
+    RAISE EXCEPTION 'Reversed expenses cannot be edited. Delete the reversal first.';
+  END IF;
+  IF a IS NULL OR a <= 0 OR a > 9000000000000 OR jsonb_array_length(p->'contributions') < 1 OR jsonb_array_length(p->'splits') < 1
+     OR (SELECT sum((x->>'amount')::bigint) FROM jsonb_array_elements(p->'contributions') x) <> a
+     OR (SELECT sum((x->>'amount')::bigint) FROM jsonb_array_elements(p->'splits') x) <> a THEN
+    RAISE EXCEPTION 'Contributions and shares must equal total';
+  END IF;
+  FOR c IN SELECT * FROM jsonb_array_elements((p->'contributions') || (p->'splits')) LOOP
+    IF NOT EXISTS (SELECT 1 FROM public.trip_members WHERE trip_id = e.trip_id AND user_id = (c->>'user_id')::uuid AND status = 'active') THEN
+      RAISE EXCEPTION 'All payers and beneficiaries must be trip members';
+    END IF;
+  END LOOP;
+  UPDATE public.expenses SET
+    title = p->>'title',
+    amount = a,
+    category = p->>'category',
+    occurred_at = (p->>'occurred_at')::timestamptz,
+    description = coalesce(p->>'description', ''),
+    receipt_path = CASE WHEN p ? 'receipt_path' THEN p->>'receipt_path' ELSE receipt_path END
+  WHERE id = eid;
+  DELETE FROM public.expense_contributions WHERE expense_id = eid;
+  DELETE FROM public.expense_splits WHERE expense_id = eid;
+  INSERT INTO public.expense_contributions SELECT eid, (x->>'user_id')::uuid, (x->>'amount')::bigint FROM jsonb_array_elements(p->'contributions') x;
+  INSERT INTO public.expense_splits SELECT eid, (x->>'user_id')::uuid, (x->>'amount')::bigint FROM jsonb_array_elements(p->'splits') x;
+  RETURN eid;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.delete_expense(eid uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  e public.expenses;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in required'; END IF;
+  SELECT * INTO e FROM public.expenses WHERE id = eid FOR UPDATE;
+  IF NOT FOUND OR NOT public.is_trip_member(e.trip_id) THEN RAISE EXCEPTION 'Expense not found'; END IF;
+  IF e.created_by <> auth.uid() THEN RAISE EXCEPTION 'Only the person who added this expense can delete it'; END IF;
+  -- Deleting an original also removes its reversal so the ledger stays consistent.
+  DELETE FROM public.expenses WHERE reversal_of = eid;
+  DELETE FROM public.expenses WHERE id = eid;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.update_settlement(p jsonb)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  sid uuid := (p->>'id')::uuid;
+  a bigint := (p->>'amount')::bigint;
+  r uuid := (p->>'recipient_id')::uuid;
+  s public.settlements;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in required'; END IF;
+  SELECT * INTO s FROM public.settlements WHERE id = sid FOR UPDATE;
+  IF NOT FOUND OR NOT public.is_trip_member(s.trip_id) THEN RAISE EXCEPTION 'Settlement not found'; END IF;
+  IF s.created_by <> auth.uid() THEN RAISE EXCEPTION 'Only the person who recorded this payment can edit it'; END IF;
+  IF a IS NULL OR a <= 0 OR a > 9000000000000 THEN RAISE EXCEPTION 'Enter a valid amount'; END IF;
+  IF r = s.sender_id OR NOT EXISTS (SELECT 1 FROM public.trip_members WHERE trip_id = s.trip_id AND user_id = r AND status = 'active') THEN
+    RAISE EXCEPTION 'Select two distinct trip members';
+  END IF;
+  UPDATE public.settlements SET recipient_id = r, amount = a, note = coalesce(p->>'note', '') WHERE id = sid;
+  RETURN sid;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.delete_settlement(sid uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  s public.settlements;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in required'; END IF;
+  SELECT * INTO s FROM public.settlements WHERE id = sid FOR UPDATE;
+  IF NOT FOUND OR NOT public.is_trip_member(s.trip_id) THEN RAISE EXCEPTION 'Settlement not found'; END IF;
+  IF s.created_by <> auth.uid() THEN RAISE EXCEPTION 'Only the person who recorded this payment can delete it'; END IF;
+  DELETE FROM public.settlements WHERE id = sid;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION
+  public.update_expense(jsonb),
+  public.delete_expense(uuid),
+  public.update_settlement(jsonb),
+  public.delete_settlement(uuid)
+FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION
+  public.update_expense(jsonb),
+  public.delete_expense(uuid),
+  public.update_settlement(jsonb),
+  public.delete_settlement(uuid)
+TO authenticated;
